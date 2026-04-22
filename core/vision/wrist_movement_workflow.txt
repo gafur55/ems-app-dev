@@ -1,0 +1,109 @@
+1 - once the app starts, you click on star session and cameras start running at 30 FPS
+2 - there is a deque that stores 5 frames of body pose all the time.
+3 - once stimulate button pressed, the average of last 5 frames are calculated and stored as the baseline angles.
+4 - after stimulation button, threads opened for finger and wrist separately.
+5 - Results from all 50 FPS collected. The 80% threshold of peak averaged.
+
+
+More in detail:
+
+STEP 1: CAPTURE BASELINES (before EMS fires)
+│
+├── pose_tracker.capture_baseline()
+│   ├── averages last 5 landmarks from _landmarks_buffer
+│   ├── averages last 5 angles from _wrist_angle_buffer
+│   ├── stores _baseline_wrist_angle = -3.2°
+│   └── saves baseline snapshot image to captures/pose/
+│
+├── hand_tracker.capture_baseline()
+│   ├── averages last 5 hand landmarks
+│   ├── calculates per-finger flexion angles
+│   ├── stores _baseline_finger_angles = {thumb: 45°, index: 30°, ...}
+│   └── saves baseline snapshot image to captures/hand/
+│
+STEP 2: RECORD TO DATABASE
+│
+├── db.record_stimulation(session_id, channel=0, intensity=5, pulse_width=250, ...)
+│   └── returns stim_id (e.g. 14)
+│
+├── for each electrode on the diagram:
+│   └── db.record_electrode(stim_id=14, channel, pixel_x, pixel_y, real_x_cm, real_y_cm)
+│
+STEP 3: START RECORDING + FIRE EMS (parallel)
+│
+│   ┌─ Thread A: pose_tracker.measure_movement(duration=1.6s)
+│   │   while elapsed < 1.6s:
+│   │       read _latest_landmarks (from background camera thread)
+│   │       angle = _calculate_wrist_angle(landmarks)
+│   │           ├── extract elbow, wrist, index, pinky positions
+│   │           ├── hand_center = (index + pinky) / 2
+│   │           ├── v1 = wrist - elbow
+│   │           ├── v2 = hand_center - wrist
+│   │           ├── unsigned_angle = arccos(dot(v1,v2) / (|v1|*|v2|))
+│   │           ├── deviation = 180 - unsigned_angle
+│   │           ├── cross = v1.x*v2.y - v1.y*v2.x
+│   │           └── return +deviation or -deviation based on cross sign
+│   │       delta = angle - baseline_angle
+│   │       store {angle, delta, elapsed_ms}
+│   │       sleep(0.02)  ← 50 samples/sec
+│   │   find peak frame (max abs delta)
+│   │   classify: extension / flexion / neutral
+│   │   save peak snapshot image
+│   │   return WristMovementResult
+│   │
+│   ├─ Thread B: hand_tracker.measure_movement(duration=1.6s)
+│   │   while elapsed < 1.6s:
+│   │       read _latest_hand_landmarks (from background camera thread)
+│   │       calculate per-finger flexion angles
+│   │       delta per finger = current - baseline
+│   │       store {finger_angles, flexion_change, elapsed_ms}
+│   │       sleep(0.02)
+│   │   find peak frames (top 80% deviation)
+│   │   average near-peak frames for stability
+│   │   return HandMovementResult
+│   │
+│   └─ Main thread (after 50ms sleep):
+│       ems_controller.continuous_stim(channel=0, intensity=5, 
+│                                       pulse_width=250, count=10, delay=0.01)
+│           ├── pulse 1: device.stimulate(ch=0, 5mA, 250μs)
+│           │   sleep(0.01)  ← 10ms between pulses
+│           ├── pulse 2: device.stimulate(...)
+│           │   sleep(0.01)
+│           ├── ... 
+│           └── pulse 10: device.stimulate(...)
+│               (total: ~100ms of stimulation)
+│               returns True
+│
+STEP 4: COLLECT RESULTS
+│
+├── pose_thread.join(timeout=5.0)      ← wait for wrist thread to finish
+│   wrist_result = WristMovementResult(
+│       baseline_wrist_angle = -3.2°,
+│       result_wrist_angle = +74.8°,
+│       wrist_angle_delta = +78.0°,
+│       wrist_direction = "extension",
+│       latency_ms = 340
+│   )
+│
+├── hand_thread.join(timeout=5.0)      ← wait for finger thread to finish
+│   finger_result = HandMovementResult(
+│       primary_finger = "index",
+│       primary_finger_movement = 45.2°,
+│       total_finger_movement = 277.7°,
+│       latency_ms = 380
+│   )
+│
+├── _set_phase_status("Stimulation complete | Wrist: 78.0° ext | Fingers: 277.7°")
+│
+├── combined = _CombinedMovementResult(wrist_result, finger_result)
+│   ├── wrist_angle_delta = 78.0
+│   ├── wrist_direction = "extension"
+│   ├── total_finger_movement = 277.7
+│   ├── primary_finger = "index"
+│   └── hand_detected = True
+│
+└── db.record_movement(stim_id=14, combined)
+    └── INSERT INTO movements (stim_id, wrist_angle_delta, wrist_direction, 
+                                total_finger_movement, primary_finger, ...)
+
+DONE — ready for next STIMULATE click

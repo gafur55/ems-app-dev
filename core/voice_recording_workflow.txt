@@ -1,0 +1,107 @@
+USER CLICKS "START SESSION"
+        │
+        ▼
+main_window.on_session_started()
+        │
+        ├── db.create_session()              ← session 55 created in DB
+        ├── SessionTranscriber(db=self.db)   ← transcriber initialized
+        ├── _start_trackers()                ← cameras start
+        │
+        └── _start_recording()
+                │
+                ▼
+        SessionRecorder.start(session_id=55, participant_id="0")
+                │
+                ├── pyaudio.PyAudio()                    ← initialize audio system
+                ├── pa.get_default_input_device_info()   ← finds "MacBook Pro Microphone"
+                │
+                ├── pa.open(format=16bit, channels=1,    ← open mic stream
+                │           rate=44100, input=True)
+                │
+                ├── wave.open("data/recordings/          ← create WAV file on disk
+                │     session_55_0_20260222_204230.wav")
+                │
+                ├── db.start_recording(session_id=55)    ← DB row created (status='recording')
+                │   returns recording_id=2
+                │
+                └── Thread(_record_loop).start()         ← background thread starts
+                        │
+                        ▼
+              ┌─────────────────────────────────┐
+              │  _record_loop() runs forever:   │
+              │                                 │
+              │  while self._recording:         │
+              │      check elapsed < 15 min     │
+              │      data = stream.read(4096)   │  ← read 4096 samples from mic
+              │      wave_file.writeframes(data) │  ← write directly to WAV file
+              │      _frames_written += 4096    │
+              │                                 │
+              │  (repeats ~10x per second)      │
+              │  (4096 samples / 44100 Hz        │
+              │   = ~93ms per chunk)            │
+              └─────────────────────────────────┘
+                        │
+                        │  ... session continues ...
+                        │  ... user places electrodes ...
+                        │  ... user stimulates ...
+                        │  ... talks during experiment ...
+                        │
+                        ▼
+
+USER CLICKS "STOP SESSION"
+        │
+        ▼
+main_window.on_session_stopped()
+        │
+        └── _stop_recording()
+                │
+                ├── self._recording = False      ← tells thread to stop
+                │
+                ├── thread.join(timeout=3.0)     ← waits for thread to finish
+                │       │
+                │       └── _record_loop exits
+                │           └── _flush_file()    ← closes WAV file
+                │
+                ├── _cleanup()
+                │   ├── stream.stop_stream()     ← close mic
+                │   ├── stream.close()
+                │   └── pa.terminate()           ← shutdown audio system
+                │
+                ├── db.finalize_recording(       ← update DB row
+                │       recording_id=2,
+                │       duration_s=73.2,            status: 'recording' → 'completed'
+                │       file_size_bytes=6.2MB)
+                │
+                └── session_transcriber.transcribe_recording()
+                        │
+                        ▼
+                  Thread(_transcribe_worker).start()   ← background thread
+                        │
+                        ├── db.create_transcription()  ← DB row (status='pending')
+                        │
+                        ├── whisper.load_model("base") ← load AI model (first time: 10s)
+                        │
+                        ├── model.transcribe(          ← speech → text (2-3 seconds)
+                        │     "session_55_0.wav")
+                        │   returns:
+                        │     text = "1 2 3 test test test we are done."
+                        │     language = "en"
+                        │
+                        ├── db.finalize_transcription() ← save text to DB
+                        │       status: 'pending' → 'completed'
+                        │
+                        ├── os.remove(wav_filepath)    ← DELETE the WAV file
+                        │
+                        ├── db.mark_recording_audio_deleted()
+                        │       status: 'completed' → 'transcribed_and_deleted'
+                        │
+                        └── callback → _on_transcription_done()
+                                │
+                                └── print("[Main] Transcription complete (54 chars)")
+
+
+WHAT'S LEFT AFTER EVERYTHING:
+═════════════════════════════
+
+  data/ems_data.db:
+  ├── session_recordings:    file
