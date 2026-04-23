@@ -532,7 +532,7 @@ class PoseTracker:
             if len(self._wrist_angle_buffer) >= 2:
                 self._baseline_wrist_angle = float(np.mean(list(self._wrist_angle_buffer)))
             else:
-                self._baseline_wrist_angle = self._calculate_wrist_angle()
+                self._baseline_wrist_angle = self._calculate_wrist_angle(avg_landmarks)
 
             self._baseline_set = True
             self._last_result = None

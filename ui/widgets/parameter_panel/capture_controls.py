@@ -1,21 +1,5 @@
-"""
-Capture controls widget for live forearm camera.
-
-Single button: "Place Electrodes"
-  → Pauses live feed
-  → Clears any existing calibration/electrodes
-  → Enters calibration mode
-  → After calibration, user places electrodes
-  → After confirming electrodes, feed resumes
-
-Signals:
-    place_electrodes_requested: Emitted when the button is clicked
-    calibration_requested: Kept for backward compat with parameter_panel
-"""
-
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton
 from PyQt6.QtCore import pyqtSignal
-from typing import Optional
 
 
 class CaptureControls(QWidget):
@@ -23,16 +7,13 @@ class CaptureControls(QWidget):
     Widget containing the Place Electrodes button.
 
     Signals:
-        place_electrodes_requested: User wants to pause, recalibrate, and place electrodes
-        calibration_requested: Forwarded for parameter_panel compat
+        place_electrodes_requested: User wants to calibrate and place electrodes
     """
 
     place_electrodes_requested = pyqtSignal()
-    calibration_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
-        self._arm_length_cm: Optional[float] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -56,25 +37,11 @@ class CaptureControls(QWidget):
         """)
         layout.addWidget(self.place_btn)
 
-    # =========================================================================
-    # Public API
-    # =========================================================================
-
-    def set_arm_length(self, arm_length_cm: Optional[float]) -> None:
-        self._arm_length_cm = arm_length_cm
-
-    def set_enabled(self, enabled: bool) -> None:
-        self.place_btn.setEnabled(enabled)
-
     def set_camera_active(self, active: bool) -> None:
         self.place_btn.setEnabled(active)
 
     def reset(self) -> None:
         pass
-
-    # =========================================================================
-    # Event Handlers
-    # =========================================================================
 
     def _on_place_clicked(self) -> None:
         print("\n Place Electrodes requested")

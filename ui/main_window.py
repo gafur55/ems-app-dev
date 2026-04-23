@@ -238,11 +238,6 @@ class EMSWindow(QMainWindow):
             self.participant_label.setText("  |  ".join(parts))
 
             print(f"\n✓ Signed in as {pid}")
-
-            # Pass arm length to capture controls
-            self.parameter_panel.capture_controls.set_arm_length(
-                self.participant.get("arm_length")
-            )
         else:
             # If no participant was ever set (first launch, user cancelled)
             if self.participant is None:
