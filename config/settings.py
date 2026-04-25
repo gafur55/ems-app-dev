@@ -58,3 +58,27 @@ MIN_INTENSITY = 0  # mA
 MAX_INTENSITY = 100  # mA
 MIN_PULSE_WIDTH = 0  # microseconds
 MAX_PULSE_WIDTH = 500  # microseconds
+
+
+MARKER_SIZE_MM = 16.0  # physical size of printed ArUco markers in mm
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADD THESE TO config/settings.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Physical mat dimensions — measure your actual printed mat
+# Markers are placed at exact corners of this rectangle
+MAT_WIDTH_MM  = 199.0   # left-right distance (ID0 → ID1)
+MAT_HEIGHT_MM = 380.0   # top-bottom distance (ID0 → ID3)
+
+# ArUco marker ID assignments
+# Mat corners (fixed to surface, never move)
+MAT_IDS =       [0, 2, 3, 4]   # TL, TR, BR, BL
+
+# Wrist marker (placed on participant's wrist)
+WRIST_ID      = 1
+
+# Electrode markers (placed on electrode pads)
+ELECTRODE_IDS = [5, 6]
+# Add more IDs here if tracking more than 2 electrodes per session
+# e.g. ELECTRODE_IDS = [5, 6, 7, 8] for 4 electrodes
