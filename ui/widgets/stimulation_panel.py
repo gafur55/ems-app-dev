@@ -41,6 +41,7 @@ class StimulationPanel(QWidget):
         group_layout.addWidget(QLabel("Channel:"), 0, 0)
         self.channel_combo = QComboBox()
         self.channel_combo.addItems([str(i) for i in range(settings.MAX_CHANNELS)])
+        self.channel_combo.setCurrentText("6")    
         group_layout.addWidget(self.channel_combo, 0, 1)
         
         # Row 1: Intensity
@@ -207,3 +208,54 @@ class StimulationPanel(QWidget):
         self.status_label.setText(message)
         self.status_label.setStyleSheet(f"color: {color}; font-style: italic;")
         self.status_label.setVisible(bool(message))
+
+
+        # ── Hotkey helpers ────────────────────────────────────────────────────
+
+    def increment_intensity(self, step: int = 1) -> None:
+        """Bump intensity by `step` mA (clamped to device max)."""
+        device_info = settings.SUPPORTED_DEVICES[settings.DEFAULT_DEVICE]
+        max_intensity = device_info["max_intensity"]
+        try:
+            current = int(self.intensity_input.text())
+        except ValueError:
+            current = settings.DEFAULT_INTENSITY
+        new_val = max(settings.MIN_INTENSITY, min(max_intensity, current + step))
+        self.intensity_input.setText(str(new_val))
+        self.set_status(f"Intensity: {new_val} mA", "lightblue")
+
+    def increment_pulse_width(self, step: int = 10) -> None:
+        """Bump pulse width by `step` μs (clamped to device max)."""
+        device_info = settings.SUPPORTED_DEVICES[settings.DEFAULT_DEVICE]
+        max_pw = device_info["max_pulse_width"]
+        try:
+            current = int(self.pulse_width_input.text())
+        except ValueError:
+            current = settings.DEFAULT_PULSE_WIDTH
+        new_val = max(settings.MIN_PULSE_WIDTH, min(max_pw, current + step))
+        self.pulse_width_input.setText(str(new_val))
+        self.set_status(f"Pulse width: {new_val} μs", "lightblue")
+
+    def increment_pulse_count(self, step: int = 5) -> None:
+        """Bump pulse count by `step` (min 1)."""
+        try:
+            current = int(self.pulse_count_input.text())
+        except ValueError:
+            current = 10
+        new_val = max(1, current + step)
+        self.pulse_count_input.setText(str(new_val))
+        self.set_status(f"Pulse count: {new_val}", "lightblue")
+
+    def reset_to_defaults(self) -> None:
+        """Reset all parameters to defaults (R key)."""
+        self.intensity_input.setText(str(settings.DEFAULT_INTENSITY))
+        self.pulse_width_input.setText(str(settings.DEFAULT_PULSE_WIDTH))
+        self.pulse_count_input.setText("10")
+        self.delay_input.setText("10")
+        self.channel_combo.setCurrentText("6")
+        self.set_status("Parameters reset to defaults", "lightgreen")
+
+    def trigger_stimulate(self) -> None:
+        """Programmatic stim trigger (Space key)."""
+        if self.isEnabled():
+            self.on_stimulate()

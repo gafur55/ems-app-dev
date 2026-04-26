@@ -92,6 +92,38 @@ class EMSWindow(QMainWindow):
     # =====================================================================
     # UI Setup
     # =====================================================================
+    def _setup_hotkeys(self) -> None:
+        """Global hotkeys for data collection."""
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QLineEdit, QApplication
+
+        def make_shortcut(key, callback, description=""):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+
+            def guarded():
+                # Don't fire while a text input is focused — let the user type
+                focused = QApplication.focusWidget()
+                if isinstance(focused, QLineEdit):
+                    return
+                callback()
+
+            sc.activated.connect(guarded)
+            return sc
+
+        self._sc_stim   = make_shortcut("Space", self.stimulation_panel.trigger_stimulate)
+        self._sc_intens = make_shortcut("I",     lambda: self.stimulation_panel.increment_intensity(1))
+        self._sc_pw     = make_shortcut("W",     lambda: self.stimulation_panel.increment_pulse_width(10))
+        self._sc_count  = make_shortcut("C",     lambda: self.stimulation_panel.increment_pulse_count(5))
+        self._sc_reset  = make_shortcut("R",     self.stimulation_panel.reset_to_defaults)
+        self._sc_intens_dn = make_shortcut("U", lambda: self.stimulation_panel.increment_intensity(-1))
+        self._sc_pw_dn     = make_shortcut("Q", lambda: self.stimulation_panel.increment_pulse_width(-10))
+        self._sc_count_dn  = make_shortcut("X", lambda: self.stimulation_panel.increment_pulse_count(-5))
+        self._sc_place = make_shortcut("P", self._on_place_electrodes)
+        print("✓ Hotkeys: Space=stim | P=place | I/U=±1mA | W/Q=±10μs | C/X=±5pulses | R=reset")
+
+
 
     def setup_ui(self):
         """Set up the user interface"""
@@ -212,6 +244,7 @@ class EMSWindow(QMainWindow):
     def _setup_stimulation_panel(self, parent_layout):
         """Create and configure the stimulation panel"""
         self.stimulation_panel = StimulationPanel()
+        self._setup_hotkeys()
         self.stimulation_panel.stimulate_requested.connect(self.on_stimulate_requested)
         parent_layout.addWidget(self.stimulation_panel)
         self._set_stimulate_enabled(False)
