@@ -82,3 +82,5 @@ WRIST_ID      = 1
 ELECTRODE_IDS = [5, 6]
 # Add more IDs here if tracking more than 2 electrodes per session
 # e.g. ELECTRODE_IDS = [5, 6, 7, 8] for 4 electrodes
+
+ELBOW_ID = 7
