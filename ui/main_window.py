@@ -39,27 +39,16 @@ from core.session_transcriber import SessionTranscriber
 
 # Database
 from data.database import EMSDatabase
+import numpy as np
 
 # =====================================================================
 # CAMERA CONFIGURATION — change these to match your setup
 # =====================================================================
-# Run `python3 find_cameras.py` to see available cameras and their indices.
-#
-# 3-camera setup (2 iPhones + laptop):
-#   HAND_CAMERA    = 0   # iPhone #1 (Continuity) → finger tracking
-#   POSE_CAMERA    = 1   # Laptop webcam           → wrist tracking
-#   FOREARM_CAMERA = 2   # iPhone #2 (Camo)        → forearm live view
-#
-# Laptop-only setup (no iPhones):
-#   HAND_CAMERA    = 0   # Laptop webcam → finger tracking
-#   POSE_CAMERA    = 0   # Laptop webcam → wrist tracking (same camera)
-#   FOREARM_CAMERA = -1  # Disabled (use static image)
-#
-HAND_CAMERA    = 0
+HAND_CAMERA    = 1
 POSE_CAMERA    = 2
-FOREARM_CAMERA = 3
+FOREARM_CAMERA = 0
 
-ARM_SIDE = "left" #mirror effect (left here is right in reality)
+ARM_SIDE = "left"  # mirror effect (left here is right in reality)
 
 
 class EMSWindow(QMainWindow):
@@ -71,37 +60,70 @@ class EMSWindow(QMainWindow):
         self.ems_controller = None
 
         # Split trackers
-        self.pose_tracker = None   # laptop cam → wrist angle
-        self.hand_tracker = None   # phone cam  → finger angles
+        self.pose_tracker = None
+        self.hand_tracker = None
         self.pose_preview = None
         self.hand_preview = None
 
         # Forearm camera (live view for electrode placement)
         self.forearm_camera = None
-        self.forearm_timer = None  # QTimer for updating live feed
+        self.forearm_timer  = None
         self.forearm_paused = False
 
         # Audio recorder
-        self.session_recorder = SessionRecorder(save_dir="data/recordings")
-        self.session_transcriber = None  # initialized after sign-in when db is available
-        self.recording_id = None  # DB recording_id
+        self.session_recorder    = SessionRecorder(save_dir="data/recordings")
+        self.session_transcriber = None
+        self.recording_id        = None
 
-        # Register atexit handler to save recording on unexpected exit
         import atexit
         atexit.register(self._emergency_stop_recording)
 
-        # Database — auto-creates data/ems_data.db
-        self.db = EMSDatabase()
+        # Database
+        self.db            = EMSDatabase()
         self.db_session_id = None
 
         # Participant data (loaded from sign-in)
-        self.participant = None
+        self.participant       = None
         self.forearm_length_cm = None
 
         self.setup_ui()
-
-        # Show sign-in dialog on startup
         self._show_sign_in()
+
+    # =====================================================================
+    # UI Setup
+    # =====================================================================
+    def _setup_hotkeys(self) -> None:
+        """Global hotkeys for data collection."""
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QLineEdit, QApplication
+
+        def make_shortcut(key, callback, description=""):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+
+            def guarded():
+                # Don't fire while a text input is focused — let the user type
+                focused = QApplication.focusWidget()
+                if isinstance(focused, QLineEdit):
+                    return
+                callback()
+
+            sc.activated.connect(guarded)
+            return sc
+
+        self._sc_stim   = make_shortcut("Space", self.stimulation_panel.trigger_stimulate)
+        self._sc_intens = make_shortcut("I",     lambda: self.stimulation_panel.increment_intensity(1))
+        self._sc_pw     = make_shortcut("W",     lambda: self.stimulation_panel.increment_pulse_width(10))
+        self._sc_count  = make_shortcut("C",     lambda: self.stimulation_panel.increment_pulse_count(5))
+        self._sc_reset  = make_shortcut("R",     self.stimulation_panel.reset_to_defaults)
+        self._sc_intens_dn = make_shortcut("U", lambda: self.stimulation_panel.increment_intensity(-1))
+        self._sc_pw_dn     = make_shortcut("Q", lambda: self.stimulation_panel.increment_pulse_width(-10))
+        self._sc_count_dn  = make_shortcut("X", lambda: self.stimulation_panel.increment_pulse_count(-5))
+        self._sc_place = make_shortcut("P", self._on_place_electrodes)
+        print("✓ Hotkeys: Space=stim | P=place | I/U=±1mA | W/Q=±10μs | C/X=±5pulses | R=reset")
+
+
 
     def setup_ui(self):
         """Set up the user interface"""
@@ -159,12 +181,36 @@ class EMSWindow(QMainWindow):
         self.body_view.setEnabled(False)
 
     def _setup_body_view(self, parent_layout):
-        """Create and configure the body diagram view"""
-        self.body_view = BodyDiagramView()
-        self.body_view.setMinimumWidth(500)
-        parent_layout.addWidget(self.body_view, stretch=1)
+        """Create body diagram view with PyQt ArUco status label below it."""
+        container = QWidget()
+        container.setMinimumWidth(500)
+        container_layout = QVBoxLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+        container.setLayout(container_layout)
 
-        # Calibration is ArUco-only — signal wired for status update
+        # Body diagram view
+        self.body_view = BodyDiagramView()
+        container_layout.addWidget(self.body_view, stretch=1)
+
+        # ArUco status label — PyQt rendered, always readable
+        self.aruco_status_label = QLabel("Camera not active")
+        self.aruco_status_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 200);
+                color: #00ff88;
+                font-family: Helvetica, Arial, sans-serif;
+                font-size: 12px;
+                padding: 5px 10px;
+            }
+        """)
+        self.aruco_status_label.setWordWrap(True)
+        self.aruco_status_label.setFixedHeight(28)
+        container_layout.addWidget(self.aruco_status_label)
+
+        parent_layout.addWidget(container, stretch=1)
+
+        # Calibration signal
         self.body_view.calibration_manager.calibration_complete.connect(
             self._on_calibration_complete
         )
@@ -190,7 +236,6 @@ class EMSWindow(QMainWindow):
         self.parameter_panel.session_started.connect(self.on_session_started)
         self.parameter_panel.session_stopped.connect(self.on_session_stopped)
 
-        # Single button: Place Electrodes → pause + clear + calibrate
         cc = self.parameter_panel.capture_controls
         cc.place_electrodes_requested.connect(self._on_place_electrodes)
 
@@ -199,10 +244,9 @@ class EMSWindow(QMainWindow):
     def _setup_stimulation_panel(self, parent_layout):
         """Create and configure the stimulation panel"""
         self.stimulation_panel = StimulationPanel()
+        self._setup_hotkeys()
         self.stimulation_panel.stimulate_requested.connect(self.on_stimulate_requested)
         parent_layout.addWidget(self.stimulation_panel)
-
-        # Stimulate button starts disabled — must place electrodes first
         self._set_stimulate_enabled(False)
 
     def _setup_electrode_button(self, parent_layout):
@@ -217,7 +261,6 @@ class EMSWindow(QMainWindow):
 
     def _show_sign_in(self):
         """Show the participant sign-in dialog."""
-        # Stop any active session first
         if self.current_session:
             self.on_session_stopped()
 
@@ -226,10 +269,9 @@ class EMSWindow(QMainWindow):
 
         if result == QDialog.DialogCode.Accepted:
             self.participant = dialog.get_participant_data()
-            pid = self.participant["participant_id"]
-
-            # Update header bar
+            pid  = self.participant["participant_id"]
             name = self.participant.get("name") or pid
+
             parts = [f"{name} ({pid})"]
             if self.participant.get("age"):
                 parts.append(f"Age: {self.participant['age']}")
@@ -238,60 +280,57 @@ class EMSWindow(QMainWindow):
             self.participant_label.setText("  |  ".join(parts))
 
             print(f"\n✓ Signed in as {pid}")
+
+            # self.parameter_panel.capture_controls.set_arm_length(
+            #     self.participant.get("arm_length")
+            # )
         else:
-            # If no participant was ever set (first launch, user cancelled)
             if self.participant is None:
-                self.participant_label.setText("No participant — click 'Switch Participant'")
+                self.participant_label.setText(
+                    "No participant — click 'Switch Participant'"
+                )
 
     # =====================================================================
     # Session lifecycle
     # =====================================================================
 
     def on_session_started(self, params):
-        """
-        Handle session start event.
-        Uses participant from sign-in + device from session form.
-        """
-        # Check participant is signed in
+        """Handle session start event."""
         if not self.participant:
             print("✗ No participant signed in — showing sign-in dialog")
             self._show_sign_in()
             if not self.participant:
                 return
 
-        pid = self.participant["participant_id"]
+        pid         = self.participant["participant_id"]
         device_name = params["device_name"]
 
-        # Create session object
         self.current_session = Session(
             participant_id=pid,
             device_name=device_name
         )
-        self.current_session.age = self.participant.get("age")
-        self.current_session.arm_width = self.participant.get("arm_width")
-        self.current_session.arm_length = self.participant.get("arm_length")
+        self.current_session.age                        = self.participant.get("age")
+        self.current_session.arm_width                  = self.participant.get("arm_width")
+        self.current_session.arm_length                 = self.participant.get("arm_length")
         self.current_session.skin_resistance_100hz_kohm = self.participant.get("skin_resistance_100hz_kohm")
-        self.current_session.skin_resistance_1khz_kohm = self.participant.get("skin_resistance_1khz_kohm")
+        self.current_session.skin_resistance_1khz_kohm  = self.participant.get("skin_resistance_1khz_kohm")
         self.current_session.skin_resistance_10khz_kohm = self.participant.get("skin_resistance_10khz_kohm")
-        self.current_session.skin_resistance_100khz_kohm = self.participant.get("skin_resistance_100khz_kohm")
-        self.current_session.pain_threshold_ma = self.participant.get("pain_threshold_ma")
-        self.current_session.experience_level = self.participant.get("experience_level")
+        self.current_session.skin_resistance_100khz_kohm= self.participant.get("skin_resistance_100khz_kohm")
+        self.current_session.pain_threshold_ma          = self.participant.get("pain_threshold_ma")
+        self.current_session.experience_level           = self.participant.get("experience_level")
 
         print(f"\n=== Session Created ===")
         print(f"Participant: {pid}")
         print(f"Device: {device_name}")
 
-        # Save session to database (participant already in DB from sign-in)
         self.db_session_id = self.db.create_session(
             participant_id=pid,
             device_name=device_name,
             forearm_length_cm=self.participant.get("arm_length"),
         )
 
-        # Connect to EMS device
         print(f"\n=== Connecting to EMS Device ===")
 
-        # Initialize transcriber now that db is available
         if self.session_transcriber is None:
             self.session_transcriber = SessionTranscriber(db=self.db)
 
@@ -307,72 +346,57 @@ class EMSWindow(QMainWindow):
             self.stimulation_panel.setEnabled(True)
             self.body_view.set_session(self.current_session)
 
-            # Start both trackers
             self._start_trackers()
-
-            # Start audio recording
             self._start_recording()
 
-            # Enable electrode placement (stimulate stays disabled)
             self.electrode_panel.setEnabled(True)
             self._set_stimulate_enabled(False)
 
             self._set_phase_status("Click 'Place Electrodes' to begin", "#FF9800")
-            print(f"Ready to place electrodes!")
+            print("Ready to place electrodes!")
         else:
             print("✗ Failed to connect to device")
             print("  Check that device is plugged in and try again")
 
     def on_session_stopped(self):
-        """
-        Handle session stop.
-        Stop trackers, disconnect device, end DB session, reset UI.
-        """
+        """Handle session stop."""
         print("\n=== Stopping Session ===")
 
-        # Stop audio recording first (before anything else)
         self._stop_recording()
-
-        # Stop trackers
         self._stop_trackers()
 
-        # Disconnect EMS device
         if self.ems_controller and self.ems_controller.is_connected():
             self.ems_controller.disconnect()
             print("✓ Device disconnected")
 
-        # Clear electrodes
         self.body_view.clear_electrodes()
         print("✓ Electrodes cleared")
 
-        # ---- End session in database ----
         if self.db_session_id:
-            # Auto-save pain threshold = max intensity used in this session
             max_intensity = self.db.get_session_max_intensity(self.db_session_id)
             if max_intensity is not None and self.participant:
                 pid = self.participant["participant_id"]
                 self.db.update_pain_threshold_ma(pid, max_intensity)
-                print(f"  Pain threshold updated: {max_intensity} mA (max intensity used)")
+                print(f"  Pain threshold updated: {max_intensity} mA")
 
             self.db.end_session(self.db_session_id)
             self.db.print_stats()
             self.db_session_id = None
 
-        # Disable controls
         self.body_view.setEnabled(False)
         self.stimulation_panel.setEnabled(False)
         self._set_stimulate_enabled(False)
         self.electrode_panel.reset()
         self.electrode_panel.setEnabled(False)
 
-        # Reset session
         self.current_session = None
-        self.ems_controller = None
+        self.ems_controller  = None
+        self.aruco_status_label.setText("Camera not active")
 
         print("✓ Session stopped - ready to start new session")
 
     # =====================================================================
-    # Single status line — shown in parameter_panel.status_label
+    # Status labels
     # =====================================================================
 
     def _set_phase_status(self, message: str, color: str = "gray") -> None:
@@ -381,6 +405,59 @@ class EMSWindow(QMainWindow):
         self.parameter_panel.status_label.setStyleSheet(
             f"color: {color}; font-weight: bold; font-size: 13px;"
         )
+
+    def _update_aruco_label(self, state: dict) -> None:
+        """Update the PyQt ArUco status label below the body view."""
+        if not state.get("mat_ready", False):
+            fills  = state.get("fills", {})
+            labels = {4: "TL", 0: "TR", 2: "BR", 3: "BL"}
+            parts  = []
+            for mid in [4, 0, 2, 3]:
+                count = fills.get(mid, 0)
+                parts.append(f"ID{mid}({labels.get(mid,'?')}): {count}/15")
+            self.aruco_status_label.setText(
+                "Waiting for mat corners — " + "  |  ".join(parts)
+            )
+            self.aruco_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(0,0,0,200);
+                    color: #ff9800;
+                    font-family: Helvetica, Arial, sans-serif;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                }
+            """)
+        elif state.get("ready"):
+            px_per_mm  = state.get("px_per_mm", 0)
+            electrodes = state.get("electrodes", {})
+            e_text     = f"  |  Electrodes: {len(electrodes)}" if electrodes else ""
+            self.aruco_status_label.setText(
+                f"✓ Calibrated  |  "
+                f"{settings.MAT_WIDTH_MM:.0f}×{settings.MAT_HEIGHT_MM:.0f}mm  |  "
+                f"{px_per_mm:.2f} px/mm{e_text}"
+            )
+            self.aruco_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(0,0,0,200);
+                    color: #00ff88;
+                    font-family: Helvetica, Arial, sans-serif;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                }
+            """)
+        else:
+            self.aruco_status_label.setText(
+                "✓ Mat ready — waiting for wrist marker (ID 1)"
+            )
+            self.aruco_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(0,0,0,200);
+                    color: #60a5fa;
+                    font-family: Helvetica, Arial, sans-serif;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                }
+            """)
 
     # =====================================================================
     # Electrode placement gate
@@ -391,29 +468,25 @@ class EMSWindow(QMainWindow):
         self.stimulation_panel.stimulate_button.setEnabled(enabled)
 
     def on_electrodes_confirmed(self):
-        """
-        Handle 'Confirm Electrode Placement' button click.
-        Validates at least 2 electrodes are placed, then enables STIMULATE.
-        """
+        """Handle 'Confirm Electrode Placement' button click."""
         electrode_count = len(self.body_view.electrodes)
 
         if electrode_count < 2:
-            print(f"✗ Need at least 2 electrodes (anode + cathode), currently: {electrode_count}")
+            print(f"✗ Need at least 2 electrodes, currently: {electrode_count}")
             self.electrode_panel.set_error(
                 f"Place at least 2 electrodes first ({electrode_count} placed)"
             )
-            self._set_phase_status(f"Place at least 2 electrodes ({electrode_count} placed)", "#dc2626")
+            self._set_phase_status(
+                f"Place at least 2 electrodes ({electrode_count} placed)", "#dc2626"
+            )
             return
 
         print(f"\n=== Electrodes Confirmed ({electrode_count} placed) ===")
 
-        # Enable stimulation
         self._set_stimulate_enabled(True)
         self.electrode_panel.set_confirmed(electrode_count)
-
         self._set_phase_status("Ready to stimulate!", "#16a34a")
 
-        # Resume the live forearm feed
         self._resume_forearm_feed()
         print("✓ Stimulation enabled — ready to go!")
 
@@ -430,11 +503,11 @@ class EMSWindow(QMainWindow):
             3. Start recording + fire stimulation simultaneously
             4. Save combined movement result to DB
         """
-        channel = params["channel"]
-        intensity = params["intensity"]
+        channel     = params["channel"]
+        intensity   = params["intensity"]
         pulse_width = params["pulse_width"]
         pulse_count = params["pulse_count"]
-        delay = params["delay"]
+        delay       = params["delay"]
 
         print(f"\n=== Stimulation Requested ===")
         print(f"Channel: {channel}")
@@ -443,7 +516,6 @@ class EMSWindow(QMainWindow):
         print(f"Pulse Count: {pulse_count}")
         print(f"Delay: {delay} ms")
 
-        # Check device
         if not self.ems_controller or not self.ems_controller.is_connected():
             self._set_phase_status("Error: Device not connected", "#dc2626")
             print("✗ Cannot stimulate - device not connected")
@@ -468,6 +540,7 @@ class EMSWindow(QMainWindow):
         if not pose_baseline_ok and not hand_baseline_ok:
             print("⚠ No tracking baselines — stimulating without tracking")
 
+        
         # ---- STEP 2: Record stimulation to database ----
         stim_id = None
         if self.db_session_id:
@@ -480,30 +553,65 @@ class EMSWindow(QMainWindow):
                 delay_ms=delay,
             )
 
-            # Save electrode positions directly from live ArUco state
-            if self.forearm_camera:
-                aruco_state = self.forearm_camera.get_aruco_state()
-                electrodes  = aruco_state.get("electrodes", {})
-                for channel, (eid, info) in enumerate(electrodes.items()):
+        self._capture_forearm_image(stim_id)
+
+
+        # Read live ArUco positions at moment of stimulation
+        if self.forearm_camera and self._electrode_placement and stim_id:
+            state      = self.forearm_camera.get_aruco_state()
+            electrodes = state.get("electrodes", {})
+            H          = state.get("homography")
+            wrist_px   = state.get("wrist_center_px")
+
+            if H is None or wrist_px is None:
+                print("⚠ Mat/wrist not ready — skipping electrode DB save")
+            else:
+                def px_to_mat_mm(px_pt):
+                    """Convert camera pixel to mat mm via homography."""
+                    pt     = np.array([[[float(px_pt[0]), float(px_pt[1])]]], dtype=np.float32)
+                    result = cv2.perspectiveTransform(pt, H)
+                    return np.array([result[0][0][0], result[0][0][1]], dtype=np.float32)
+
+                import cv2
+                wrist_mm = px_to_mat_mm(wrist_px)
+                print(f"  Wrist in mat frame: ({wrist_mm[0]:.1f}, {wrist_mm[1]:.1f}) mm")
+
+                for i, (eid, info) in enumerate(electrodes.items()):
+                    e_px    = info["pixel"]
+                    e_mm    = px_to_mat_mm(e_px)
+                    diff_mm = e_mm - wrist_mm
+
+                    # Straight-line distance from wrist to electrode in mat mm
+                    distance_mm = float(np.linalg.norm(diff_mm))
+
+                    # Mat-frame offset components
+                    dx_mm = float(diff_mm[0])   # positive = right in mat frame
+                    dy_mm = float(diff_mm[1])   # positive = down in mat frame
+
+                    print(f"  DB: E{eid} — "
+                        f"dist={distance_mm:.1f}mm | "
+                        f"dx={dx_mm:.1f}mm, dy={dy_mm:.1f}mm | "
+                        f"mat=({e_mm[0]:.1f}, {e_mm[1]:.1f})mm")
+
                     self.db.record_electrode(
                         session_id=self.db_session_id,
-                        channel=channel,
-                        pixel_x=float(info["pixel"][0]),
-                        pixel_y=float(info["pixel"][1]),
+                        channel=i,
+                        pixel_x=float(e_px[0]),
+                        pixel_y=float(e_px[1]),
                         stim_id=stim_id,
-                        real_x_cm=info["lateral_mm"] / 10.0,  # mm → cm, thumb = positive
-                        real_y_cm=info["down_mm"]    / 10.0,  # mm → cm, toward wrist
+                        real_x_cm=dx_mm / 10.0,   # mat x offset from wrist
+                        real_y_cm=dy_mm / 10.0,   # mat y offset from wrist
+                        placement_method="aruco_mat",
                     )
 
-        # ---- STEP 3: Start recording + stimulate simultaneously ----
-        stim_duration_s = (pulse_count * delay) / 1000.0
-        recording_duration = stim_duration_s + 1.5  # 1.5s tail to capture peak after stim
 
-        # Results containers for threads
-        wrist_result_box = [None]
+        # ---- STEP 3: Start recording + stimulate simultaneously ----
+        stim_duration_s    = (pulse_count * delay) / 1000.0
+        recording_duration = stim_duration_s + 1.5
+
+        wrist_result_box  = [None]
         finger_result_box = [None]
 
-        # Start pose recording thread (wrist angle)
         pose_thread = None
         if pose_baseline_ok and self.pose_tracker:
             print(f"\n--- Recording wrist movement for {recording_duration:.1f}s ---")
@@ -519,7 +627,6 @@ class EMSWindow(QMainWindow):
             pose_thread = threading.Thread(target=_record_pose, daemon=True)
             pose_thread.start()
 
-        # Start hand recording thread (finger angles)
         hand_thread = None
         if hand_baseline_ok and self.hand_tracker:
             print(f"--- Recording finger movement for {recording_duration:.1f}s ---")
@@ -535,10 +642,8 @@ class EMSWindow(QMainWindow):
             hand_thread = threading.Thread(target=_record_hand, daemon=True)
             hand_thread.start()
 
-        # Small delay to let recording threads start capturing
         time.sleep(0.05)
 
-        # Fire stimulation (blocks while pulses are sent)
         success = self.ems_controller.continuous_stim(
             channel=channel,
             intensity=intensity,
@@ -552,7 +657,7 @@ class EMSWindow(QMainWindow):
             return
 
         # ---- STEP 4: Wait for recordings + save to database ----
-        wrist_result = None
+        wrist_result  = None
         finger_result = None
 
         if pose_thread:
@@ -563,7 +668,6 @@ class EMSWindow(QMainWindow):
             hand_thread.join(timeout=5.0)
             finger_result = finger_result_box[0]
 
-        # Build status message
         status_parts = ["Stimulation complete ✓"]
 
         if wrist_result and wrist_result.pose_detected:
@@ -581,7 +685,6 @@ class EMSWindow(QMainWindow):
 
         self._set_phase_status(" | ".join(status_parts), "#16a34a")
 
-        # Save combined movement result to database
         if stim_id:
             combined = _CombinedMovementResult(wrist_result, finger_result)
             print(f"\n  DB DEBUG: wrist_delta={combined.wrist_angle_delta}, "
@@ -591,21 +694,12 @@ class EMSWindow(QMainWindow):
             self.db.record_movement(stim_id, combined)
 
     # =====================================================================
-    # Tracker management (2 cameras)
+    # Tracker management
     # =====================================================================
 
     def _start_trackers(self) -> None:
-        """
-        Start both movement trackers and open preview windows.
-
-        Camera assignments:
-            camera 0 = iPhone #1      → HandTracker    (finger angles)
-            camera 1 = laptop webcam   → PoseTracker    (wrist angle)
-            camera 2 = iPhone #2       → ForearmCamera  (live forearm view)
-
-        Adjust camera_index values if your setup differs.
-        """
-        arm_side = ARM_SIDE   # auto-detects most visible arm
+        """Start both movement trackers and open preview windows."""
+        arm_side = ARM_SIDE
 
         print("\n=== Starting Movement Trackers ===")
 
@@ -613,13 +707,15 @@ class EMSWindow(QMainWindow):
         if FOREARM_CAMERA >= 0:
             self.forearm_camera = ForearmCamera(camera_index=FOREARM_CAMERA)
             if self.forearm_camera.start():
+                if self.participant and self.participant.get("arm_length"):
+                    self.forearm_camera.set_arm_length(
+                        self.participant["arm_length"]
+                    )
                 print("✓ Forearm camera ready (live view)")
-                # Start QTimer for live feed updates (~30 FPS)
                 self.forearm_timer = QTimer()
                 self.forearm_timer.timeout.connect(self._update_forearm_feed)
-                self.forearm_timer.start(33)  # ~30 FPS
+                self.forearm_timer.start(33)
                 self.forearm_paused = False
-                # Enable pause button
                 self.parameter_panel.capture_controls.set_camera_active(True)
             else:
                 print("⚠ Forearm camera failed to start")
@@ -627,6 +723,11 @@ class EMSWindow(QMainWindow):
         else:
             print("  Forearm camera disabled (FOREARM_CAMERA = -1)")
             self.forearm_camera = None
+
+
+        self.electrode_monitor = ElectrodePositionMonitor(self)
+        self.electrode_monitor.show()
+
 
         # --- Pose tracker: wrist angle ---
         pose_save_dir = f"captures/pose_{self.db_session_id:03d}"
@@ -643,7 +744,7 @@ class EMSWindow(QMainWindow):
             print("✓ Pose tracker ready (wrist angle)")
             self.pose_preview = TrackingPreviewWindow(self.pose_tracker)
             self.pose_preview.setWindowTitle(
-                f"Wrist Tracking — Pose (auto arm) [Laptop Camera]"
+                "Wrist Tracking — Pose (auto arm) [Laptop Camera]"
             )
             self.pose_preview.show()
             print("✓ Pose preview window opened")
@@ -674,7 +775,6 @@ class EMSWindow(QMainWindow):
 
     def _stop_trackers(self) -> None:
         """Stop all trackers, forearm camera, and close preview windows."""
-        # Stop forearm feed
         if self.forearm_timer:
             self.forearm_timer.stop()
             self.forearm_timer = None
@@ -708,6 +808,9 @@ class EMSWindow(QMainWindow):
             self.hand_tracker = None
             print("✓ Hand tracker stopped")
 
+        if hasattr(self, 'electrode_monitor') and self.electrode_monitor:
+            self.electrode_monitor.close()
+            self.electrode_monitor = None
     # =====================================================================
     # Audio recording
     # =====================================================================
@@ -717,14 +820,13 @@ class EMSWindow(QMainWindow):
         if not self.db_session_id or not self.participant:
             return
 
-        pid = self.participant["participant_id"]
+        pid      = self.participant["participant_id"]
         filepath = self.session_recorder.start(
             session_id=self.db_session_id,
             participant_id=pid,
         )
 
         if filepath:
-            # Register in DB immediately (status='recording')
             self.recording_id = self.db.start_recording(
                 session_id=self.db_session_id,
                 participant_id=pid,
@@ -736,19 +838,16 @@ class EMSWindow(QMainWindow):
         if not self.session_recorder.is_recording:
             return
 
-        filepath = self.session_recorder.stop()
-
-        # Finalize recording in DB
-        recording_id = self.recording_id
-        session_id = self.db_session_id
+        filepath       = self.session_recorder.stop()
+        recording_id   = self.recording_id
+        session_id     = self.db_session_id
         participant_id = self.participant["participant_id"] if self.participant else ""
 
         if recording_id and filepath and os.path.exists(filepath):
-            duration = self.session_recorder._frames_written / self.session_recorder.SAMPLE_RATE
+            duration  = self.session_recorder._frames_written / self.session_recorder.SAMPLE_RATE
             file_size = os.path.getsize(filepath)
             self.db.finalize_recording(recording_id, duration, file_size)
 
-            # Trigger background transcription → deletes WAV after success
             if self.session_transcriber:
                 self.session_transcriber.transcribe_recording(
                     recording_id=recording_id,
@@ -766,17 +865,12 @@ class EMSWindow(QMainWindow):
         self.recording_id = None
 
     def _on_transcription_done(self, success: bool, text: str):
-        """Callback when background transcription finishes."""
         if success:
             print(f"[Main] Transcription complete ({len(text)} chars)")
         else:
             print(f"[Main] Transcription failed: {text}")
 
     def _emergency_stop_recording(self):
-        """
-        atexit handler: save recording if app exits unexpectedly.
-        Called by Python on interpreter shutdown.
-        """
         if self.session_recorder.is_recording:
             print("\n[Emergency] Saving recording before exit...")
             try:
@@ -785,27 +879,40 @@ class EMSWindow(QMainWindow):
                 print(f"[Emergency] Failed to save recording: {e}")
 
     def closeEvent(self, event):
-        """
-        Handle window close (X button, Cmd+Q, etc).
-        Ensures recording is saved before the app exits.
-        """
-        # Stop recording first
         if self.session_recorder.is_recording:
             print("\n[Close] Saving recording before exit...")
             self._stop_recording()
-
-        # Stop session cleanly if active
         if self.current_session:
             self.on_session_stopped()
-
         event.accept()
 
+    def _capture_forearm_image(self, stim_id: int):
+        """
+        Capture current forearm camera frame and save to captures/.
+        Returns filepath or None.
+        """
+        if not self.forearm_camera:
+            return None
+
+        frame = self.forearm_camera.get_frame()
+        if frame is None:
+            return None
+
+        import cv2
+        save_dir = f"captures/forearm_{self.db_session_id:03d}"
+        os.makedirs(save_dir, exist_ok=True)
+        filepath = os.path.join(save_dir, f"stim_{stim_id:04d}.jpg")
+        cv2.imwrite(filepath, frame)
+        print(f"  Forearm image saved: {filepath}")
+        return filepath
+
     # =====================================================================
-    # Live forearm camera: pause/resume/calibrate
+    # Live forearm camera
     # =====================================================================
 
     def _update_forearm_feed(self):
-        """QTimer callback: push latest camera frame to body view."""
+        if hasattr(self, 'electrode_monitor') and self.electrode_monitor:
+            self.electrode_monitor.update_positions(self.forearm_camera)
         if self.forearm_paused:
             return
         if self.forearm_camera and self.forearm_camera.is_running:
@@ -813,66 +920,126 @@ class EMSWindow(QMainWindow):
             if frame is not None:
                 self.body_view.update_live_frame(frame)
 
+            state = self.forearm_camera.get_aruco_state()
+            self._update_aruco_label(state)
+
+            H = state.get("homography")
+            if H is not None:
+                self.body_view.update_aruco_grid(state)
+
+
     def _on_place_electrodes(self):
         """
-        ArUco-only electrode placement flow.
-
-        The forearm camera runs ArUco detection continuously.
-        When this button is pressed:
-          - If all 4 reference markers are detected → calibrate instantly
-          - If electrode markers (IDs 4, 5) are also detected → auto-place them
-          - Otherwise → user clicks manually to place electrodes
-        No feed pause, no manual calibration clicks needed.
+        Validates mat + wrist + both electrodes are detected.
+        Saves electrode positions to DB. Enables stimulate button.
         """
         print("\n=== Place Electrodes ===")
 
-        # Clear previous state
         self.body_view.clear_electrodes()
         self.body_view.clear_calibration()
         self.electrode_panel.reset()
         self._set_stimulate_enabled(False)
 
-        # Check ArUco is ready
-        if not self.forearm_camera or not self.forearm_camera.is_aruco_ready():
-            self._set_phase_status(
-                "ArUco markers not detected — ensure all 4 corner markers are visible.",
-                "#dc2626"
-            )
-            print("✗ ArUco not ready — hold all 4 forearm markers in view and try again.")
+        if not self.forearm_camera:
+            self._set_phase_status("No forearm camera active", "#dc2626")
             return
 
-        # Grab latest ArUco state
-        aruco_state = self.forearm_camera.get_aruco_state()
+        state = self.forearm_camera.get_aruco_state()
 
-        # Calibrate from ArUco
-        self._set_phase_status("Calibrating from ArUco markers...", "#FF9800")
-        ok = self.body_view.calibrate_from_aruco(aruco_state)
+        # ── Check 1: mat corners ──────────────────────────────────────────────
+        if not (state.get("mat_ready") or state.get("ready")):
+            self._set_phase_status(
+                "Mat corners not detected — ensure IDs 0,2,3,4 are visible.", "#dc2626"
+            )
+            print("✗ Mat not ready")
+            return
+
+        # ── Check 2: wrist ArUco ──────────────────────────────────────────────
+        wrist_px = state.get("wrist_center_px")
+        wrist_mm = state.get("wrist_center_mm")
+        if wrist_px is None or wrist_mm is None:
+            self._set_phase_status(
+                "Wrist marker (ID=1) not detected — place it on the wrist.", "#dc2626"
+            )
+            print("✗ Wrist ArUco not detected")
+            return
+
+        # ── Check 3: both electrode ArUcos ────────────────────────────────────
+        electrodes = state.get("electrodes", {})
+        missing = [eid for eid in settings.ELECTRODE_IDS if eid not in electrodes]
+        if missing:
+            self._set_phase_status(
+                f"Electrode markers missing: ID {missing} — attach to electrode pads.",
+                "#dc2626"
+            )
+            print(f"✗ Missing electrode ArUcos: {missing}")
+            return
+
+        # ── All detected — calibrate body view ───────────────────────────────
+        ok = self.body_view.calibrate_from_aruco(state)
         if not ok:
             self._set_phase_status("Calibration failed — check marker visibility.", "#dc2626")
             return
 
-        # Auto-place electrode markers if IDs 4/5 are detected
-        placed = self.body_view.auto_place_electrodes_from_aruco(aruco_state)
+        # ── Compute electrode positions relative to wrist ─────────────────────
+        # Wrist = (0,0), toward elbow = positive along, thumb side = positive lateral
+        arm_dir  = state.get("arm_dir")
+        perp_dir = state.get("perp_dir")
+        px_per_mm = state.get("px_per_mm", 1.0)
 
-        if placed > 0:
-            self._set_phase_status(
-                f"Calibrated. {placed} electrode(s) auto-placed. Confirm when ready.",
-                "#2563eb"
-            )
-        else:
-            self._set_phase_status(
-                "Calibrated via ArUco. Click on image to place electrodes, then Confirm.",
-                "#2563eb"
-            )
+        electrode_data = []
+        for eid, info in electrodes.items():
+            e_px = info["pixel"]
+
+            if arm_dir is not None and perp_dir is not None:
+                import numpy as np
+                relative   = e_px - wrist_px
+                along_mm   = float(np.dot(relative, arm_dir))  / px_per_mm
+                lateral_mm = float(np.dot(relative, perp_dir)) / px_per_mm
+            else:
+                along_mm   = info.get("down_mm",    0.0)
+                lateral_mm = info.get("lateral_mm", 0.0)
+
+            electrode_data.append({
+                "electrode_id": eid,
+                "pixel_x":      float(e_px[0]),
+                "pixel_y":      float(e_px[1]),
+                "along_mm":     round(along_mm,   1),   # toward elbow
+                "lateral_mm":   round(lateral_mm, 1),   # thumb=+, pinky=-
+                "wrist_mat_x":  round(float(wrist_mm[0]), 1),  # wrist in mat frame
+                "wrist_mat_y":  round(float(wrist_mm[1]), 1),
+            })
+
+            print(f"  E{eid}: {along_mm:.1f}mm from wrist toward elbow, "
+                f"{lateral_mm:.1f}mm lateral (+ = thumb)")
+
+        print(f"  Wrist in mat frame: "
+            f"({wrist_mm[0]:.1f}, {wrist_mm[1]:.1f}) mm")
+
+        # Store for use when stimulate is pressed
+        self._electrode_placement = electrode_data
+        self._wrist_mat_mm        = wrist_mm
+
+
+        # ── Update UI ─────────────────────────────────────────────────────────
+        placed = self.body_view.auto_place_electrodes_from_aruco(state)
+        self.electrode_panel.set_confirmed(len(electrode_data))
+        self._set_stimulate_enabled(True)
+        self._set_phase_status(
+            f"✓ {len(electrode_data)} electrodes detected and saved. Ready to stimulate!",
+            "#16a34a"
+        )
+        print(f"✓ Electrode placement saved — stimulation enabled")
+
 
     def _resume_forearm_feed(self):
-        """Resume live feed (kept for on_electrodes_confirmed compatibility)."""
+        """Resume live feed."""
         self.forearm_paused = False
         self.body_view._placement_enabled = False
         print("Live feed active")
 
     def _on_calibration_complete(self, mapper):
-        """Called after ArUco calibration — status already set in _on_place_electrodes."""
+        """Called after ArUco calibration."""
         pass
 
 
@@ -884,53 +1051,123 @@ class _CombinedMovementResult:
     """
     Bridges separate WristMovementResult + HandMovementResult into the
     combined format that db.record_movement() expects.
-
-    db.record_movement() reads:
-        wrist_angle_delta, wrist_direction,
-        total_finger_movement, primary_finger, primary_finger_movement,
-        movement_type,
-        flexion_change (dict: finger → total),
-        baseline_finger_angles, result_finger_angles, finger_angle_deltas (dicts),
-        latency_ms, confidence, hand_detected
     """
 
     def __init__(self, wrist_result=None, finger_result=None):
-        # --- Wrist data (from PoseTracker) ---
+        # Wrist data (from PoseTracker)
         if wrist_result and wrist_result.pose_detected:
             self.wrist_angle_delta = wrist_result.wrist_angle_delta
-            self.wrist_direction = wrist_result.wrist_direction
+            self.wrist_direction   = wrist_result.wrist_direction
         else:
             self.wrist_angle_delta = 0.0
-            self.wrist_direction = "no_data"
+            self.wrist_direction   = "no_data"
 
-        # --- Finger data (from HandTracker) ---
+        # Finger data (from HandTracker)
         if finger_result and finger_result.hand_detected:
-            self.total_finger_movement = finger_result.total_finger_movement
-            self.primary_finger = finger_result.primary_finger
+            self.total_finger_movement   = finger_result.total_finger_movement
+            self.primary_finger          = finger_result.primary_finger
             self.primary_finger_movement = finger_result.primary_finger_movement
-            self.movement_type = finger_result.movement_type
-            self.flexion_change = finger_result.flexion_change
-            self.baseline_finger_angles = finger_result.baseline_finger_angles
-            self.result_finger_angles = finger_result.result_finger_angles
-            self.finger_angle_deltas = finger_result.finger_angle_deltas
-            self.latency_ms = finger_result.latency_ms
-            self.confidence = finger_result.confidence
-            self.hand_detected = True
+            self.movement_type           = finger_result.movement_type
+            self.flexion_change          = finger_result.flexion_change
+            self.baseline_finger_angles  = finger_result.baseline_finger_angles
+            self.result_finger_angles    = finger_result.result_finger_angles
+            self.finger_angle_deltas     = finger_result.finger_angle_deltas
+            self.latency_ms              = finger_result.latency_ms
+            self.confidence              = finger_result.confidence
+            self.hand_detected           = True
         else:
-            self.total_finger_movement = 0.0
-            self.primary_finger = ""
+            self.total_finger_movement   = 0.0
+            self.primary_finger          = ""
             self.primary_finger_movement = 0.0
-            self.movement_type = "no_data"
-            self.flexion_change = {
+            self.movement_type           = "no_data"
+            self.flexion_change          = {
                 "thumb": 0, "index": 0, "middle": 0, "ring": 0, "pinky": 0
             }
-            self.baseline_finger_angles = {}
-            self.result_finger_angles = {}
-            self.finger_angle_deltas = {}
-            self.confidence = 0.0
-            self.hand_detected = False
-            # Fall back to wrist latency
+            self.baseline_finger_angles  = {}
+            self.result_finger_angles    = {}
+            self.finger_angle_deltas     = {}
+            self.confidence              = 0.0
+            self.hand_detected           = False
             if wrist_result and wrist_result.pose_detected:
                 self.latency_ms = wrist_result.latency_ms
             else:
                 self.latency_ms = 0.0
+
+
+
+
+
+
+
+
+
+
+#----------_-----_Electrode Position Monitoring-----------------------__------_---__-______--_-
+
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel
+from PyQt6.QtCore import QTimer
+
+class ElectrodePositionMonitor(QDialog):
+    """Live monitor showing electrode positions relative to wrist."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Electrode Position Monitor")
+        self.setMinimumWidth(400)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        self.labels = {}
+        for eid in [5, 6]:
+            lbl = QLabel(f"E{eid}: waiting...")
+            lbl.setStyleSheet("font-family: monospace; font-size: 13px; padding: 8px;")
+            layout.addWidget(lbl)
+            self.labels[eid] = lbl
+
+        self.wrist_lbl = QLabel("Wrist: waiting...")
+        self.wrist_lbl.setStyleSheet("font-family: monospace; font-size: 13px; padding: 8px; color: #2563eb;")
+        layout.addWidget(self.wrist_lbl)
+
+    def update_positions(self, forearm_camera):
+        """Call this every frame to update displayed positions."""
+        if not forearm_camera:
+            return
+
+        state      = forearm_camera.get_aruco_state()
+        H          = state.get("homography")
+        wrist_px   = state.get("wrist_center_px")
+        electrodes = state.get("electrodes", {})
+
+        if H is None or wrist_px is None:
+            return
+
+        import cv2, numpy as np
+
+        def px_to_mat_mm(px_pt):
+            pt     = np.array([[[float(px_pt[0]), float(px_pt[1])]]], dtype=np.float32)
+            result = cv2.perspectiveTransform(pt, H)
+            return np.array([result[0][0][0], result[0][0][1]], dtype=np.float32)
+
+        wrist_mm = px_to_mat_mm(wrist_px)
+        self.wrist_lbl.setText(
+            f"Wrist: px=({wrist_px[0]:.0f}, {wrist_px[1]:.0f})  "
+            f"mat=({wrist_mm[0]:.1f}, {wrist_mm[1]:.1f}) mm"
+        )
+
+        for eid, info in electrodes.items():
+            if eid not in self.labels:
+                continue
+            e_px    = info["pixel"]
+            e_mm    = px_to_mat_mm(e_px)
+            diff_mm = e_mm - wrist_mm
+            dx_mm   = float(diff_mm[0])
+            dy_mm   = float(diff_mm[1])
+            dist_mm = float(np.linalg.norm(diff_mm))
+
+            self.labels[eid].setText(
+                f"E{eid}:  px=({e_px[0]:.0f}, {e_px[1]:.0f})\n"
+                f"       mat=({e_mm[0]:.1f}, {e_mm[1]:.1f}) mm\n"
+                f"       from wrist: dx={dx_mm:+.1f}mm  dy={dy_mm:+.1f}mm  dist={dist_mm:.1f}mm"
+            )

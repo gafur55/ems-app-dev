@@ -38,7 +38,6 @@ class BodyDiagramView(QGraphicsView):
             self._on_calibration_complete
         )
 
-        # Electrode placement enabled only after calibration
         self._placement_enabled = False
 
         self._setup_view()
@@ -63,8 +62,15 @@ class BodyDiagramView(QGraphicsView):
         print(f"Graphics view connected to session: {session.participant_id}")
 
     def update_live_frame(self, cv_image) -> None:
-        """Push latest ArUco-annotated camera frame to background."""
+        """Push latest camera frame to background."""
         self.scene_manager.update_live_frame(cv_image)
+
+    def update_aruco_grid(self, aruco_state: dict) -> None:
+        """
+        Update the perspective-correct grid from ArUco homography.
+        Called every frame from main_window when mat is calibrated.
+        """
+        self.scene_manager.update_aruco_grid(aruco_state)
 
     def load_captured_image(self, image) -> None:
         self.scene_manager.load_captured_image(image)
@@ -72,8 +78,6 @@ class BodyDiagramView(QGraphicsView):
     def calibrate_from_aruco(self, aruco_state: dict) -> bool:
         """
         Run ArUco calibration from the given state dict.
-        Draws reference markers on scene and enables electrode placement.
-
         Returns True on success.
         """
         self._placement_enabled = False
@@ -81,9 +85,7 @@ class BodyDiagramView(QGraphicsView):
 
     def auto_place_electrodes_from_aruco(self, aruco_state: dict) -> int:
         """
-        Place electrode markers automatically from ArUco electrode detections
-        (marker IDs 4, 5, …). Clears existing electrodes first.
-
+        Place electrode markers automatically from ArUco electrode detections.
         Returns number of electrodes placed.
         """
         if not self._placement_enabled:
@@ -101,9 +103,9 @@ class BodyDiagramView(QGraphicsView):
             px, py = float(info["pixel"][0]), float(info["pixel"][1])
             if self.electrode_manager.place_electrode(px, py):
                 placed += 1
-                print(f"  E{eid} auto-placed: "
-                      f"{info['down_mm']:.1f}mm from elbow | "
-                      f"{abs(info['lateral_mm']):.1f}mm toward {info['side']}")
+                print(f"  E{eid} auto-placed at "
+                        f"{info.get('along_mm', info.get('down_mm', 0)):.1f}mm along | "
+                        f"{abs(info.get('lateral_mm', 0)):.1f}mm lateral ({info.get('side', '')})")
 
         print(f"✓ {placed} electrode(s) auto-placed from ArUco")
         return placed
@@ -145,12 +147,15 @@ class BodyDiagramView(QGraphicsView):
             else:
                 print("Maximum electrodes reached.")
         else:
-            print("[blocked] Click 'Place Electrodes' first — ArUco must detect all 4 markers.")
+            print("[blocked] Click 'Place Electrodes' first — "
+                  "ArUco must detect all 4 markers.")
 
         super().mousePressEvent(event)
 
     def _handle_right_click(self, scene_pos) -> None:
-        marker = self.electrode_manager.find_electrode_at(scene_pos, self.transform())
+        marker = self.electrode_manager.find_electrode_at(
+            scene_pos, self.transform()
+        )
         if marker:
             self.electrode_manager.delete_electrode(marker)
 

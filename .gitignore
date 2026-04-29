@@ -257,3 +257,6 @@ test_calibration.py
 migrate_resistance.py
 find_cameras.py
 dev_scratch/
+
+
+2_people_analysis/
