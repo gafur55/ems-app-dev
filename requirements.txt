@@ -45,3 +45,4 @@ pyaudio==0.2.14
 # pyaudio requires "brew install portaudio" on macOS, "sudo apt-get install portaudio19-dev" on Ubuntu
 openai-whisper==20250625
 # brew install ffmpeg on macOS, "sudo apt-get install ffmpeg" on Ubuntu
+pandas
