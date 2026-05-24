@@ -45,7 +45,7 @@ import numpy as np
 # CAMERA CONFIGURATION — change these to match your setup
 # =====================================================================
 HAND_CAMERA    = 1
-POSE_CAMERA    = 2
+POSE_CAMERA    = -1
 FOREARM_CAMERA = 0
 
 ARM_SIDE = "left"  # mirror effect (left here is right in reality)
@@ -727,27 +727,32 @@ class EMSWindow(QMainWindow):
 
 
         # --- Pose tracker: wrist angle ---
-        pose_save_dir = f"captures/pose_{self.db_session_id:03d}"
-        self.pose_tracker = PoseTracker(
-            camera_index=POSE_CAMERA,
-            arm=arm_side,
-            smoothing_window=5,
-            noise_threshold=2.0,
-            show_preview=True,
-            save_dir=pose_save_dir,
-        )
-
-        if self.pose_tracker.start():
-            print("✓ Pose tracker ready (wrist angle)")
-            self.pose_preview = TrackingPreviewWindow(self.pose_tracker)
-            self.pose_preview.setWindowTitle(
-                "Wrist Tracking — Pose (auto arm) [Laptop Camera]"
+        if POSE_CAMERA >= 0:
+            pose_save_dir = f"captures/pose_{self.db_session_id:03d}"
+            self.pose_tracker = PoseTracker(
+                camera_index=POSE_CAMERA,
+                arm=arm_side,
+                smoothing_window=5,
+                noise_threshold=2.0,
+                show_preview=True,
+                save_dir=pose_save_dir,
             )
-            self.pose_preview.show()
-            print("✓ Pose preview window opened")
+
+            if self.pose_tracker.start():
+                print("✓ Pose tracker ready (wrist angle)")
+                self.pose_preview = TrackingPreviewWindow(self.pose_tracker)
+                self.pose_preview.setWindowTitle(
+                    "Wrist Tracking — Pose (auto arm) [Laptop Camera]"
+                )
+                self.pose_preview.show()
+                print("✓ Pose preview window opened")
+            else:
+                print("⚠ Pose tracker failed to start — wrist tracking unavailable")
+                self.pose_tracker = None
         else:
-            print("⚠ Pose tracker failed to start — wrist tracking unavailable")
+            print("  Pose tracker disabled (POSE_CAMERA = -1)")
             self.pose_tracker = None
+        
 
         # --- Hand tracker: finger angles ---
         hand_save_dir = f"captures/hand_{self.db_session_id:03d}"
