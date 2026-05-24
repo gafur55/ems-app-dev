@@ -62,9 +62,6 @@ MAX_PULSE_WIDTH = 500  # microseconds
 
 MARKER_SIZE_MM = 16.0  # physical size of printed ArUco markers in mm
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ADD THESE TO config/settings.py
-# ─────────────────────────────────────────────────────────────────────────────
 
 # Physical mat dimensions — measure your actual printed mat
 # Markers are placed at exact corners of this rectangle
