@@ -81,3 +81,4 @@ ELECTRODE_IDS = [5, 6]
 # e.g. ELECTRODE_IDS = [5, 6, 7, 8] for 4 electrodes
 
 ELBOW_ID = 7
+WRIST_RADIAL_ID = 8  

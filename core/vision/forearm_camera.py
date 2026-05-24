@@ -244,13 +244,16 @@ class ForearmCamera:
 
         if not arm_state["ready"]:
             state = {
-                "ready":      False,
-                "mat_ready":  True,
-                "arm_ready":  False,
-                "wrist_fill": arm_state.get("wrist_fill", 0),
-                "has_length": arm_state.get("has_length", False),
-                "px_per_mm":  mat_state["px_per_mm"],
-                "homography": mat_state["homography"],
+                "ready":             False,
+                "mat_ready":         True,
+                "arm_ready":         False,
+                "wrist_fill":        arm_state.get("wrist_fill", 0),
+                "wrist_radial_fill": arm_state.get("wrist_radial_fill", 0),
+                "elbow_fill":        arm_state.get("elbow_fill", 0),
+                "has_length":        arm_state.get("has_length", False),
+                "missing":           arm_state.get("missing", []),
+                "px_per_mm":         mat_state["px_per_mm"],
+                "homography":        mat_state["homography"],
             }
             return annotated, state
 
@@ -283,9 +286,12 @@ class ForearmCamera:
             "electrodes":        electrode_state["electrodes"],
             "suggestions":       electrode_state["suggestions"],
 
+            "wrist_radial_px":   arm_state["wrist_radial_px"],
+
+
             # Compat fields for CalibrationManager / AnatomicalCoordinateMapper
             "wrist_pinky_px":    arm_state["wrist_center_px"],  # approx
-            "wrist_thumb_px":    arm_state["wrist_center_px"],  # refined by contour
+            "wrist_thumb_px":    arm_state["wrist_radial_px"],  # refined by contour
             "elbow_pinky_px":    arm_state["elbow_center_px"],
             "elbow_thumb_px":    arm_state["elbow_center_px"],
             "wrist_width_mm":    self._arm_tracker.get_width_at_s(0.0) or 0.0,

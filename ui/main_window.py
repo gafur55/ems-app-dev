@@ -557,41 +557,38 @@ class EMSWindow(QMainWindow):
 
 
         # Read live ArUco positions at moment of stimulation
+        # Save electrodes in ARM-RELATIVE coordinates (independent of mat orientation)
         if self.forearm_camera and self._electrode_placement and stim_id:
             state      = self.forearm_camera.get_aruco_state()
             electrodes = state.get("electrodes", {})
-            H          = state.get("homography")
             wrist_px   = state.get("wrist_center_px")
+            arm_dir    = state.get("arm_dir")
+            perp_dir   = state.get("perp_dir")
+            px_per_mm  = state.get("px_per_mm", 1.0)
 
-            if H is None or wrist_px is None:
-                print("⚠ Mat/wrist not ready — skipping electrode DB save")
+            if (wrist_px is None or arm_dir is None
+                    or perp_dir is None or px_per_mm <= 0):
+                print("⚠ Arm geometry not ready — skipping electrode DB save")
+            elif not electrodes:
+                print("⚠ No electrode markers visible — skipping electrode DB save")
             else:
-                def px_to_mat_mm(px_pt):
-                    """Convert camera pixel to mat mm via homography."""
-                    pt     = np.array([[[float(px_pt[0]), float(px_pt[1])]]], dtype=np.float32)
-                    result = cv2.perspectiveTransform(pt, H)
-                    return np.array([result[0][0][0], result[0][0][1]], dtype=np.float32)
-
-                import cv2
-                wrist_mm = px_to_mat_mm(wrist_px)
-                print(f"  Wrist in mat frame: ({wrist_mm[0]:.1f}, {wrist_mm[1]:.1f}) mm")
-
                 for i, (eid, info) in enumerate(electrodes.items()):
-                    e_px    = info["pixel"]
-                    e_mm    = px_to_mat_mm(e_px)
-                    diff_mm = e_mm - wrist_mm
+                    e_px       = info["pixel"]
+                    relative   = e_px - wrist_px
 
-                    # Straight-line distance from wrist to electrode in mat mm
-                    distance_mm = float(np.linalg.norm(diff_mm))
+                    # Arm-relative offsets — invariant to arm rotation on the mat
+                    along_mm   = float(np.dot(relative, arm_dir))  / px_per_mm   # toward elbow
+                    lateral_mm = float(np.dot(relative, perp_dir)) / px_per_mm   # + = thumb side
 
-                    # Mat-frame offset components
-                    dx_mm = float(diff_mm[0])   # positive = right in mat frame
-                    dy_mm = float(diff_mm[1])   # positive = down in mat frame
+                    distance_mm = float(np.hypot(along_mm, lateral_mm))
+                    side = ("thumb" if lateral_mm > 0
+                            else "pinky" if lateral_mm < 0
+                            else "center")
 
                     print(f"  DB: E{eid} — "
-                        f"dist={distance_mm:.1f}mm | "
-                        f"dx={dx_mm:.1f}mm, dy={dy_mm:.1f}mm | "
-                        f"mat=({e_mm[0]:.1f}, {e_mm[1]:.1f})mm")
+                        f"along={along_mm:+.1f}mm (toward elbow), "
+                        f"lateral={lateral_mm:+.1f}mm ({side}), "
+                        f"dist={distance_mm:.1f}mm")
 
                     self.db.record_electrode(
                         session_id=self.db_session_id,
@@ -599,11 +596,11 @@ class EMSWindow(QMainWindow):
                         pixel_x=float(e_px[0]),
                         pixel_y=float(e_px[1]),
                         stim_id=stim_id,
-                        real_x_cm=dx_mm / 10.0,   # mat x offset from wrist
-                        real_y_cm=dy_mm / 10.0,   # mat y offset from wrist
-                        placement_method="aruco_mat",
+                        real_x_cm=lateral_mm / 10.0,         # + = thumb/radial, - = pinky/ulnar
+                        real_y_cm=along_mm   / 10.0,         # + = toward elbow, 0 = at wrist
+                        distance_from_wrist_cm=distance_mm / 10.0,
+                        placement_method="aruco_arm",
                     )
-
 
         # ---- STEP 3: Start recording + stimulate simultaneously ----
         stim_duration_s    = (pulse_count * delay) / 1000.0
@@ -958,10 +955,19 @@ class EMSWindow(QMainWindow):
         wrist_px = state.get("wrist_center_px")
         wrist_mm = state.get("wrist_center_mm")
         if wrist_px is None or wrist_mm is None:
-            self._set_phase_status(
-                "Wrist marker (ID=1) not detected — place it on the wrist.", "#dc2626"
-            )
-            print("✗ Wrist ArUco not detected")
+            missing = state.get("missing", [])
+            label_map = {
+                "wrist":         f"wrist (ID={settings.WRIST_ID})",
+                "elbow":         f"elbow (ID={settings.ELBOW_ID})",
+                "wrist_radial":  f"wrist radial (ID={settings.WRIST_RADIAL_ID}, thumb side)",
+            }
+            if missing:
+                labels = ", ".join(label_map.get(m, m) for m in missing)
+                msg = f"Missing arm markers: {labels}"
+            else:
+                msg = "Arm markers not detected — check wrist, elbow, and radial IDs."
+            self._set_phase_status(msg, "#dc2626")
+            print(f"✗ {msg}")
             return
 
         # ── Check 3: both electrode ArUcos ────────────────────────────────────
@@ -1104,70 +1110,90 @@ class _CombinedMovementResult:
 
 #----------_-----_Electrode Position Monitoring-----------------------__------_---__-______--_-
 
+#----------_-----_Electrode Position Monitoring-----------------------__------_---__-______--_-
+
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel
 from PyQt6.QtCore import QTimer
 
+
 class ElectrodePositionMonitor(QDialog):
-    """Live monitor showing electrode positions relative to wrist."""
+    """Live monitor showing electrode positions relative to the wrist marker."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Electrode Position Monitor")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(440)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
 
         layout = QVBoxLayout()
         self.setLayout(layout)
 
+        # Wrist (origin) label
+        self.wrist_lbl = QLabel("Wrist: waiting...")
+        self.wrist_lbl.setStyleSheet(
+            "font-family: monospace; font-size: 13px; padding: 8px; "
+            "color: #1e40af; background-color: #eff6ff; border-radius: 4px;"
+        )
+        layout.addWidget(self.wrist_lbl)
+
+        # Per-electrode labels
         self.labels = {}
-        for eid in [5, 6]:
+        for eid in settings.ELECTRODE_IDS:
             lbl = QLabel(f"E{eid}: waiting...")
-            lbl.setStyleSheet("font-family: monospace; font-size: 13px; padding: 8px;")
+            lbl.setStyleSheet(
+                "font-family: monospace; font-size: 13px; padding: 8px; "
+                "color: #111827; background-color: #f9fafb; border-radius: 4px;"
+            )
             layout.addWidget(lbl)
             self.labels[eid] = lbl
 
-        self.wrist_lbl = QLabel("Wrist: waiting...")
-        self.wrist_lbl.setStyleSheet("font-family: monospace; font-size: 13px; padding: 8px; color: #2563eb;")
-        layout.addWidget(self.wrist_lbl)
-
     def update_positions(self, forearm_camera):
-        """Call this every frame to update displayed positions."""
+        """Refresh distances every frame. Wrist marker is the origin."""
         if not forearm_camera:
             return
 
         state      = forearm_camera.get_aruco_state()
-        H          = state.get("homography")
         wrist_px   = state.get("wrist_center_px")
+        wrist_mm   = state.get("wrist_center_mm")
+        arm_dir    = state.get("arm_dir")
+        perp_dir   = state.get("perp_dir")
+        px_per_mm  = state.get("px_per_mm", 1.0)
         electrodes = state.get("electrodes", {})
 
-        if H is None or wrist_px is None:
+        if (wrist_px is None or arm_dir is None
+                or perp_dir is None or px_per_mm <= 0):
+            self.wrist_lbl.setText("Wrist: not detected (need IDs 1, 7, 8 + mat)")
             return
 
-        import cv2, numpy as np
+        # Wrist as origin — show its mat position so user knows where (0,0) is
+        if wrist_mm is not None:
+            self.wrist_lbl.setText(
+                f"Wrist (origin):  px=({wrist_px[0]:.0f}, {wrist_px[1]:.0f})  "
+                f"mat=({wrist_mm[0]:.1f}, {wrist_mm[1]:.1f}) mm"
+            )
+        else:
+            self.wrist_lbl.setText(
+                f"Wrist (origin):  px=({wrist_px[0]:.0f}, {wrist_px[1]:.0f})"
+            )
 
-        def px_to_mat_mm(px_pt):
-            pt     = np.array([[[float(px_pt[0]), float(px_pt[1])]]], dtype=np.float32)
-            result = cv2.perspectiveTransform(pt, H)
-            return np.array([result[0][0][0], result[0][0][1]], dtype=np.float32)
-
-        wrist_mm = px_to_mat_mm(wrist_px)
-        self.wrist_lbl.setText(
-            f"Wrist: px=({wrist_px[0]:.0f}, {wrist_px[1]:.0f})  "
-            f"mat=({wrist_mm[0]:.1f}, {wrist_mm[1]:.1f}) mm"
-        )
-
-        for eid, info in electrodes.items():
-            if eid not in self.labels:
+        # Per-electrode arm-relative offsets
+        for eid, lbl in self.labels.items():
+            info = electrodes.get(eid)
+            if info is None:
+                lbl.setText(f"E{eid}: not detected")
                 continue
-            e_px    = info["pixel"]
-            e_mm    = px_to_mat_mm(e_px)
-            diff_mm = e_mm - wrist_mm
-            dx_mm   = float(diff_mm[0])
-            dy_mm   = float(diff_mm[1])
-            dist_mm = float(np.linalg.norm(diff_mm))
 
-            self.labels[eid].setText(
-                f"E{eid}:  px=({e_px[0]:.0f}, {e_px[1]:.0f})\n"
-                f"       mat=({e_mm[0]:.1f}, {e_mm[1]:.1f}) mm\n"
-                f"       from wrist: dx={dx_mm:+.1f}mm  dy={dy_mm:+.1f}mm  dist={dist_mm:.1f}mm"
+            e_px       = info["pixel"]
+            relative   = e_px - wrist_px
+            along_mm   = float(np.dot(relative, arm_dir))  / px_per_mm
+            lateral_mm = float(np.dot(relative, perp_dir)) / px_per_mm
+            dist_mm    = float(np.hypot(along_mm, lateral_mm))
+
+            along_label = "toward elbow" if along_mm >= 0 else "past wrist"
+            side_label  = "+side" if lateral_mm >= 0 else "-side"
+
+            lbl.setText(
+                f"E{eid}:  distance from wrist = {dist_mm:.1f} mm\n"
+                f"        along arm   = {abs(along_mm):.1f} mm ({along_label})\n"
+                f"        lateral     = {abs(lateral_mm):.1f} mm ({side_label})"
             )
