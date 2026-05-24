@@ -38,7 +38,7 @@ traitlets==5.14.3
 wcwidth==0.2.14
 wheel==0.45.1
 widgetsnbextension==4.0.15
-opencv-python>=4.8.0
+opencv-python-headless>=4.8.0 
 mediapipe>=0.10.0
 numpy>=1.24.0
 pyaudio==0.2.14
